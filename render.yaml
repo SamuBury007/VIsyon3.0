@@ -4,7 +4,8 @@ services:
     env: python
     plan: free
     buildCommand: "chmod +x build.sh && ./build.sh"
-    startCommand: "gunicorn app:app --workers 1 --timeout 120 --bind 0.0.0.0:$PORT"
+    # Cambiato il tipo di worker in gthread per gestire meglio i loop asincroni di Playwright
+    startCommand: "gunicorn app:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
@@ -13,6 +14,6 @@ services:
       - key: WEBSHARE_PORT
         value: "80"
       - key: WEBSHARE_USER
-        sync: false   # Valorizza questa variabile direttamente sulla dashboard di Render
+        sync: false
       - key: WEBSHARE_PASS
-        sync: false   # Valorizza questa variabile direttamente sulla dashboard di Render
+        sync: false
