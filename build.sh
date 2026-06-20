@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
-# Aggiorna pip e installa i pacchetti Python requisiti
+# Aggiorna pip e installa i pacchetti Python
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# Installa il browser Chromium e tutte le librerie di sistema Linux necessarie per farlo girare headless
+# Installa SOLO il binario di Chromium senza i pacchetti di sistema (APT)
 playwright install chromium
-playwright install-deps chromium
