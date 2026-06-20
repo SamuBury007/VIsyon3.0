@@ -13,6 +13,6 @@ services:
       - key: WEBSHARE_PORT
         value: "80"
       - key: WEBSHARE_USER
-        sync: false   # inserisci manualmente nella dashboard Render
+        sync: false   # Valorizza questa variabile direttamente sulla dashboard di Render
       - key: WEBSHARE_PASS
-        sync: false   # inserisci manualmente nella dashboard Render
+        sync: false   # Valorizza questa variabile direttamente sulla dashboard di Render
