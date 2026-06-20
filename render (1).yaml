@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: vixsrc-extractor
+    env: python
+    plan: free
+    buildCommand: "chmod +x build.sh && ./build.sh"
+    startCommand: "gunicorn app:app --workers 1 --timeout 120 --bind 0.0.0.0:$PORT"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: WEBSHARE_HOST
+        value: p.webshare.io
+      - key: WEBSHARE_PORT
+        value: "80"
+      - key: WEBSHARE_USER
+        sync: false   # inserisci manualmente nella dashboard Render
+      - key: WEBSHARE_PASS
+        sync: false   # inserisci manualmente nella dashboard Render
