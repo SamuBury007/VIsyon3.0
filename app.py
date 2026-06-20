@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VixSrc M3U8 Extractor v9 - Debug esteso + fix check-ip
+VixSrc M3U8 Extractor v9.1 - Fixed Proxy Auth & Playwright Context
 """
 
 import os
@@ -8,7 +8,8 @@ import sys
 import uuid
 import asyncio
 import base64
-from urllib.parse import quote
+import re
+from urllib.parse import quote, urljoin
 from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
 import requests as req_lib
 
@@ -24,6 +25,8 @@ PROXY_PASS = os.environ.get("WEBSHARE_PASS", "")
 PROXY_SESSION = str(uuid.uuid4())[:8]
 
 def _sticky_user():
+    if not PROXY_USER:
+        return ""
     base = PROXY_USER.replace("-rotate", "")
     return f"{base}-rotate-session-{PROXY_SESSION}"
 
@@ -45,7 +48,7 @@ def get_requests_proxies():
 
 async def extract_playlist_url(movie_url):
     playlist_urls = []
-    all_requests = []  # log di TUTTE le richieste per debug
+    all_requests = []  
 
     from playwright.async_api import async_playwright
 
@@ -64,25 +67,37 @@ async def extract_playlist_url(movie_url):
             ]
         }
         if proxy:
-            launch_args["proxy"] = proxy
-            print(f"[*] Proxy: {proxy['server']} user={proxy['username']}", flush=True)
+            launch_args["proxy"] = {
+                "server": proxy["server"],
+                "username": proxy["username"],
+                "password": proxy["password"]
+            }
+            print(f"[*] Proxy Lancio Browser: {proxy['server']} user={proxy['username']}", flush=True)
         else:
-            print("[!] Nessun proxy", flush=True)
+            print("[!] Nessun proxy configurato", flush=True)
 
         browser = await p.chromium.launch(**launch_args)
-        context = await browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 720},
-            ignore_https_errors=True,
-        )
+        
+        # Argomenti del contesto (Cruciale reinserire le credenziali proxy qui)
+        context_args = {
+            "user_agent": USER_AGENT,
+            "viewport": {"width": 1280, "height": 720},
+            "ignore_https_errors": True,
+        }
+        if proxy:
+            context_args["proxy"] = {
+                "server": proxy["server"],
+                "username": proxy["username"],
+                "password": proxy["password"]
+            }
 
-        # Intercetta su TUTTO il contesto (include iframe)
+        context = await browser.new_context(**context_args)
+
+        # Intercettazione delle richieste di rete
         async def on_request(req):
             url = req.url
-            # Logga tutto (prime 120 chars) per debug
-            short = url[:120]
             if any(x in url for x in ["vixsrc", "playlist", "m3u8", "stream", "video", "cdn", "hls"]):
-                print(f"  REQ: {short}", flush=True)
+                print(f"  REQ: {url[:120]}", flush=True)
                 all_requests.append(url)
 
             if "/playlist/" in url and "vixsrc.to" in url:
@@ -110,14 +125,14 @@ async def extract_playlist_url(movie_url):
 
         page = await context.new_page()
 
-        print(f"[*] Caricamento: {movie_url}", flush=True)
+        print(f"[*] Caricamento pagina: {movie_url}", flush=True)
         try:
             await page.goto(movie_url, wait_until="domcontentloaded", timeout=30000)
             print(f"[*] Pagina caricata (domcontentloaded)", flush=True)
         except Exception as e:
-            print(f"[-] goto error: {e}", flush=True)
+            print(f"[-] Errore page.goto: {e}", flush=True)
 
-        # Aspetta fino a 50s controllando ogni secondo
+        # Ciclo di attesa asincrono del player
         print("[*] In attesa del player...", flush=True)
         for i in range(50):
             await asyncio.sleep(1)
@@ -126,56 +141,43 @@ async def extract_playlist_url(movie_url):
                 await asyncio.sleep(2)
                 break
             if i == 10:
-                # Screenshot per debug - salva titolo pagina
                 try:
                     title = await page.title()
-                    url_now = page.url
-                    print(f"[*] @10s - Titolo: '{title}' URL: {url_now}", flush=True)
-                except:
-                    pass
-                # Prova click play
-                try:
-                    await page.click(".play-button, .jw-icon-playback, button[aria-label='Play'], .vjs-play-control", timeout=1000)
-                    print("[*] Click play eseguito", flush=True)
+                    print(f"[*] @10s - Titolo: '{title}' URL attuale: {page.url}", flush=True)
+                    await page.click(".play-button, .jw-icon-playback, button[aria-label='Play'], .vjs-play-control", timeout=1500)
+                    print("[*] Tentativo click pulsante Play eseguito", flush=True)
                 except:
                     pass
             if i == 20:
                 try:
-                    title = await page.title()
-                    print(f"[*] @20s - Titolo: '{title}' - Richieste logggate: {len(all_requests)}", flush=True)
-                    # Controlla se siamo su pagina Cloudflare
                     content = await page.content()
-                    if "cloudflare" in content.lower() or "challenge" in content.lower() or "just a moment" in content.lower():
-                        print("[-] CLOUDFLARE CHALLENGE RILEVATO!", flush=True)
-                    elif "vixsrc" in content.lower():
-                        print("[*] Pagina VixSrc OK", flush=True)
-                    # Screenshot base64 per debug
-                    try:
-                        ss = await page.screenshot(type="jpeg", quality=30)
-                        b64 = base64.b64encode(ss).decode()
-                        print(f"[SCREENSHOT_B64]{b64}[/SCREENSHOT_B64]", flush=True)
-                    except:
-                        pass
+                    if any(x in content.lower() for x in ["cloudflare", "challenge", "just a moment"]):
+                        print("[-] RILEVATO BLOCCO CLOUDFLARE CHALLENGE!", flush=True)
+                    else:
+                        print("[*] Pagina VixSrc accessibile senza blocchi visibili", flush=True)
+                    
+                    ss = await page.screenshot(type="jpeg", quality=30)
+                    b64 = base64.b64encode(ss).decode()
+                    print(f"[SCREENSHOT_B64]{b64}[/SCREENSHOT_B64]", flush=True)
                 except Exception as e:
-                    print(f"[-] Debug @20s: {e}", flush=True)
+                    print(f"[-] Errore diagnostica @20s: {e}", flush=True)
             if i % 10 == 9:
-                print(f"[.] {i+1}s - nessun link ancora...", flush=True)
+                print(f"[.] {i+1}s passato - nessun link catturato...", flush=True)
 
-        # Scan JS nei frame
+        # Scansione di backup del codice HTML nei frame
         try:
-            import re
             for frame in page.frames:
                 try:
-                    content = await frame.content()
-                    matches = re.findall(r'https?://[^\s\'"<>]+(?:playlist|m3u8)[^\s\'"<>]*', content)
+                    f_content = await frame.content()
+                    matches = re.findall(r'https?://[^\s\'"<>]+(?:playlist|m3u8)[^\s\'"<>]*', f_content)
                     for u in matches:
                         if u not in playlist_urls:
                             playlist_urls.append(u)
-                            print(f"[+] Da frame HTML: {u}", flush=True)
+                            print(f"[+] Trovato regex da sorgente frame HTML: {u}", flush=True)
                 except:
                     pass
         except Exception as e:
-            print(f"[-] Frame scan: {e}", flush=True)
+            print(f"[-] Errore frame scan: {e}", flush=True)
 
         await browser.close()
 
@@ -187,7 +189,7 @@ async def get_best_playlist(movie_url):
     if not urls:
         return None
 
-    print(f"[*] Tutti i link ({len(urls)}):", flush=True)
+    print(f"[*] Elenco totale link estratti ({len(urls)}):", flush=True)
     for u in urls:
         print(f"   {u}", flush=True)
 
@@ -203,12 +205,11 @@ async def get_best_playlist(movie_url):
 
 
 # ============================================================
-# Flask Routes
+# Flask Endpoints
 # ============================================================
 
 @app.route('/check-ip')
 def check_ip():
-    """Check IP senza Playwright per evitare crash"""
     proxies = get_requests_proxies()
     proxy = get_proxy_config()
 
@@ -218,7 +219,7 @@ def check_ip():
         results["proxy_server"] = proxy["server"]
         results["proxy_user"] = proxy["username"]
 
-    # Test con requests (veloce, non crasha)
+    # Test con proxy
     try:
         r = req_lib.get("https://api.ipify.org?format=json", proxies=proxies, timeout=10)
         results["ip_via_proxy"] = r.json()
@@ -237,19 +238,33 @@ def check_ip():
 
 @app.route('/debug-page')
 def debug_page():
-    """Carica una URL di test e restituisce titolo + se Cloudflare blocca"""
     url = request.args.get('url', 'https://vixsrc.to/movie/786892/')
 
     async def run():
         from playwright.async_api import async_playwright
         proxy = get_proxy_config()
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                proxy=proxy,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
-            )
-            context = await browser.new_context(user_agent=USER_AGENT, ignore_https_errors=True)
+            launch_args = {
+                "headless": True,
+                "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+            }
+            if proxy:
+                launch_args["proxy"] = {
+                    "server": proxy["server"],
+                    "username": proxy["username"],
+                    "password": proxy["password"]
+                }
+            browser = await p.chromium.launch(**launch_args)
+            
+            context_args = {"user_agent": USER_AGENT, "ignore_https_errors": True}
+            if proxy:
+                context_args["proxy"] = {
+                    "server": proxy["server"],
+                    "username": proxy["username"],
+                    "password": proxy["password"]
+                }
+            
+            context = await browser.new_context(**context_args)
             page = await context.new_page()
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=20000)
@@ -257,11 +272,11 @@ def debug_page():
                 title = await page.title()
                 final_url = page.url
                 content = await page.content()
-                is_cf = "cloudflare" in content.lower() or "just a moment" in content.lower()
+                is_cf = any(x in content.lower() for x in ["cloudflare", "just a moment"])
                 ss = await page.screenshot(type="jpeg", quality=40)
                 ss_b64 = base64.b64encode(ss).decode()
             except Exception as e:
-                title = f"ERRORE: {e}"
+                title = f"ERRORE RUNTIME: {e}"
                 final_url = url
                 is_cf = False
                 ss_b64 = ""
@@ -278,7 +293,7 @@ def debug_page():
 def proxy_stream():
     target_url = request.args.get('url')
     if not target_url:
-        return jsonify({'error': 'url mancante'}), 400
+        return jsonify({'error': 'Parametro url mancante'}), 400
 
     proxies = get_requests_proxies()
     headers = {
@@ -299,7 +314,6 @@ def proxy_stream():
                 if line.startswith('http://') or line.startswith('https://'):
                     return f"{base}/proxy?url={quote(line, safe='')}"
                 elif line and not line.startswith('#'):
-                    from urllib.parse import urljoin
                     abs_url = urljoin(target_url, line)
                     return f"{base}/proxy?url={quote(abs_url, safe='')}"
                 return line
@@ -322,11 +336,11 @@ def index():
 
 @app.route('/extract', methods=['POST'])
 def api_extract():
-    data = request.get_json()
+    data = request.get_json() or {}
     movie_url = data.get('url', '')
 
     if not movie_url:
-        return jsonify({'success': False, 'error': 'URL richiesto'})
+        return jsonify({'success': False, 'error': 'URL obbligatorio'})
 
     try:
         loop = asyncio.new_event_loop()
@@ -339,7 +353,7 @@ def api_extract():
             proxied_url = f"{base}/proxy?url={quote(playlist_url, safe='')}"
             return jsonify({'success': True, 'url': proxied_url, 'original': playlist_url})
         else:
-            return jsonify({'success': False, 'error': 'Nessun link trovato. Controlla i log Render e visita /check-ip e /debug-page per diagnostica.'})
+            return jsonify({'success': False, 'error': 'Nessun link m3u8 individuato. Controlla i log di Render e le rotte di diagnostica.'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
@@ -447,12 +461,12 @@ HTML_TEMPLATE = '''
             xhr.onerror = function() {
                 document.getElementById('loader').className = 'loader';
                 document.getElementById('result').className = 'result error';
-                document.getElementById('result').innerHTML = 'Errore di rete';
+                document.getElementById('result').innerHTML = 'Errore di rete generico';
             };
             xhr.ontimeout = function() {
                 document.getElementById('loader').className = 'loader';
                 document.getElementById('result').className = 'result error';
-                document.getElementById('result').innerHTML = 'Timeout (120s superato)';
+                document.getElementById('result').innerHTML = 'Timeout elaborazione server superato (120s)';
             };
             xhr.send(JSON.stringify({ url: url }));
         }
@@ -467,11 +481,11 @@ HTML_TEMPLATE = '''
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
-    print(f"[*] Session ID: {PROXY_SESSION}", flush=True)
+    print(f"[*] Avvio Server con Session ID Proxy: {PROXY_SESSION}", flush=True)
     if len(sys.argv) > 1:
         async def main():
             url = await get_best_playlist(sys.argv[1])
-            print(f"\n[+] {url}" if url else "\n[-] Nessuna trovata")
+            print(f"\n[+] Link Risultato: {url}" if url else "\n[-] Nessun link trovato via CLI")
         asyncio.run(main())
     else:
         app.run(host='0.0.0.0', port=port, debug=False)
