@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Installazione completa di tutte le dipendenze grafiche per Chromium e Playwright
+# Installazione completa delle dipendenze grafiche e di input (incluso libxkbcommon)
 RUN apt-get update && apt-get install -y \
     wget \
     curl \
@@ -25,6 +25,8 @@ RUN apt-get update && apt-get install -y \
     libxtst6 \
     libxrender1 \
     libxss1 \
+    libxkbcommon0 \
+    libfontconfig1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
