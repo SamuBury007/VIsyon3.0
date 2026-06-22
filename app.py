@@ -29,7 +29,7 @@ async def extract_playlist_url(movie_url):
                 "--no-sandbox", 
                 "--disable-setuid-sandbox", 
                 "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled" # Camuffa Playwright da browser umano
+                "--disable-blink-features=AutomationControlled"
             ]
         )
 
@@ -41,70 +41,85 @@ async def extract_playlist_url(movie_url):
         )
 
         page = await context.new_page()
-
-        # Evita che i siti leggano "navigator.webdriver = true"
         await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
+        # Cattura i link m3u8 che passano direttamente dal network (anche dentro gli iframe)
         async def handle_request(request):
             url = request.url
-            if "playlist" in url or "m3u8" in url or ".m3u8" in url:
+            if "playlist" in url or "m3u8" in url:
                 if url not in playlist_urls:
                     playlist_urls.append(url)
 
         page.on("request", handle_request)
 
         try:
-            # Aumentato il timeout di caricamento iniziale
+            # Carica la pagina principale
             await page.goto(movie_url, wait_until="domcontentloaded", timeout=60000)
             
-            # 1. Prova a cliccare su un eventuale grande bottone Play o sul video per attivare la rete
+            # Attesa per il caricamento degli elementi dinamici e degli iframe
+            await asyncio.sleep(5)
+
+            # Clicca sul player principale per forzare l'avvio del network
             try:
-                # Cerca selettori comuni di player video o overlay di play
-                play_selectors = [
-                    "video", ".jw-video", ".vjs-tech", "iframe", 
-                    "[aria-label='Play']", ".play-button", ".playbtn"
-                ]
+                play_selectors = ["video", ".jw-video", ".vjs-tech", "iframe", "[aria-label='Play']"]
                 for selector in play_selectors:
                     if await page.locator(selector).count() > 0:
                         await page.locator(selector).first.click(timeout=3000)
                         break
             except:
-                pass # Se non riesce a cliccare, prosegue con l'attesa passiva
+                pass
 
-            # 2. Attesa dinamica: controlla se trova link ogni secondo
-            for _ in range(25):
+            # Attesa di controllo progressiva
+            for _ in range(15):
                 await asyncio.sleep(1)
                 if len(playlist_urls) > 0:
                     break
-        except Exception as e:
-            print(f"Errore durante la navigazione: {e}")
-            await asyncio.sleep(5)
 
-        # 3. Estrazione via Javascript (Regex aggiornata)
+        except Exception as e:
+            print(f"Errore navigazione principale: {e}")
+
+        # ESTRAZIONE JAVASCRIPT AVANZATA (Scansiona la pagina e TUTTI gli iframe presenti)
         try:
-            js_result = await page.evaluate("""
+            # Funzione JS per estrarre i link m3u8 dal codice html
+            js_script = """
                 () => {
                     const results = [];
-                    // Cerca ovunque nella pagina e negli script
+                    const regex = /https?:\\/[^'"\\s\\n\\r]*\\.(m3u8|playlist)[^'"\\s\\n\\r]*/g;
+                    
+                    // Cerca nel documento corrente
                     const html = document.documentElement.innerHTML;
-                    const matches = html.match(/https?:\\/\\/[^'"\\s\\n\\r]*\\.(m3u8|playlist)[^'"\\s\\n\\r]*/g);
+                    const matches = html.match(regex);
                     if (matches) results.push(...matches);
                     
+                    // Cerca nei tag script
                     document.querySelectorAll('script').forEach(s => {
                         const text = s.textContent || '';
                         const matchesScript = text.match(/https?:\\/\\/[^'"\\s]*\\/playlist\\/[^'"\\s]*/g);
                         if (matchesScript) results.push(...matchesScript);
                     });
-
+                    
                     return [...new Set(results)];
                 }
-            """)
-
-            for url in js_result:
+            """
+            
+            # 1. Estrazione dal frame principale
+            main_results = await page.evaluate(js_script)
+            for url in main_results:
                 if url not in playlist_urls:
                     playlist_urls.append(url)
-        except:
-            pass
+
+            # 2. Estrazione ricorsiva da tutti gli iframe caricati nella pagina
+            for frame in page.frames:
+                try:
+                    frame_results = await frame.evaluate(js_script)
+                    for url in frame_results:
+                        if url not in playlist_urls:
+                            playlist_urls.append(url)
+                except:
+                    continue # Salta i frame protetti da politiche di Cross-Origin rigide
+
+        except Exception as e:
+            print(f"Errore durante l'estrazione JS: {e}")
 
         await browser.close()
 
