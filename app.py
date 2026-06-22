@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """
-VixSrc M3U8 Extractor v4 - VISYON Backend (Render + Docker Ready)
+VixSrc M3U8 Extractor v4 - VISYON Backend (Render + Docker Stable)
 """
 
-import re
-import sys
-import json
 import asyncio
 import requests
 import os
-from urllib.parse import urlparse, parse_qs, urlencode
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)  # 🔥 FIX CORS per Netlify
+CORS(app)
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
@@ -29,7 +25,10 @@ async def extract_playlist_url(movie_url):
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]  # 🔥 FIX RENDER
+        )
 
         context = await browser.new_context(
             user_agent=USER_AGENT,
@@ -41,33 +40,20 @@ async def extract_playlist_url(movie_url):
         async def handle_request(request):
             url = request.url
 
-            if "/playlist/" in url and "vixsrc.to" in url:
+            if "vixsrc.to" in url and "/playlist/" in url:
                 if url not in playlist_urls:
                     playlist_urls.append(url)
 
-            if "playlist" in url and "m3u8" in url:
-                if url not in playlist_urls:
-                    playlist_urls.append(url)
-
-        async def handle_response(response):
-            url = response.url
-            if "/playlist/" in url and "vixsrc.to" in url:
-                if url not in playlist_urls:
-                    playlist_urls.append(url)
+            if "m3u8" in url and url not in playlist_urls:
+                playlist_urls.append(url)
 
         page.on("request", handle_request)
-        page.on("response", handle_response)
 
         try:
-            await page.goto(movie_url, wait_until="networkidle", timeout=30000)
-
-            for _ in range(10):
-                await asyncio.sleep(1)
-                if playlist_urls:
-                    break
-
+            await page.goto(movie_url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(5)
         except Exception:
-            await asyncio.sleep(3)
+            pass
 
         await browser.close()
 
@@ -89,18 +75,16 @@ def _fetch_m3u8(url, referer):
             },
             timeout=10,
         )
-        if r.status_code == 200:
-            return r.text
+        return r.text if r.status_code == 200 else None
     except:
-        pass
-    return None
+        return None
 
 
 def _playlist_has_audio(content):
     if not content:
         return False
-    content = content.upper()
-    return "EXT-X-MEDIA:TYPE=AUDIO" in content or "MP4A" in content
+    c = content.upper()
+    return "EXT-X-MEDIA:TYPE=AUDIO" in c or "MP4A" in c
 
 
 def _is_master_playlist(content):
@@ -119,31 +103,31 @@ async def get_best_playlist(movie_url):
 
     candidates = urls
 
-    master_with_audio = None
-    any_with_audio = None
+    best = None
+    fallback = None
 
     for u in candidates:
-        content = _fetch_m3u8(u, referer=movie_url)
+        content = _fetch_m3u8(u, movie_url)
         if not content:
             continue
 
         has_audio = _playlist_has_audio(content)
         is_master = _is_master_playlist(content)
 
-        if has_audio and not any_with_audio:
-            any_with_audio = u
+        if has_audio and not fallback:
+            fallback = u
 
         if has_audio and is_master:
-            master_with_audio = u
+            best = u
             break
 
-    if master_with_audio:
-        return master_with_audio
+    if best:
+        return best
 
-    if any_with_audio:
-        return any_with_audio
+    if fallback:
+        return fallback
 
-    return candidates[0] if candidates else None
+    return candidates[0]
 
 
 # ============================================================
@@ -152,7 +136,11 @@ async def get_best_playlist(movie_url):
 
 @app.route("/")
 def index():
-    return render_template("visyon.html")
+    # 🔥 FIX: niente render_template (evita crash Render)
+    return jsonify({
+        "status": "online",
+        "service": "VISYON API"
+    })
 
 
 @app.route("/extract", methods=["POST"])
@@ -167,14 +155,14 @@ def api_extract():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        playlist_url = loop.run_until_complete(get_best_playlist(movie_url))
+        result = loop.run_until_complete(get_best_playlist(movie_url))
 
         loop.close()
 
-        if playlist_url:
+        if result:
             return jsonify({
                 "success": True,
-                "url": playlist_url
+                "url": result
             })
 
         return jsonify({"success": False, "error": "Nessun link trovato"})
@@ -188,7 +176,7 @@ def api_extract():
 # ============================================================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))  # 🔥 IMPORTANTE PER RENDER
+    port = int(os.environ.get("PORT", 8080))
 
     app.run(
         host="0.0.0.0",
