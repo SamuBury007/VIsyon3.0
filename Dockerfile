@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Installazione completa delle dipendenze grafiche e di input (incluso libxkbcommon)
+# Installazione di tutte le librerie Linux necessarie a Chromium (incluso libxkbcommon)
 RUN apt-get update && apt-get install -y \
     wget \
     curl \
@@ -33,14 +33,14 @@ WORKDIR /app
 
 COPY . /app
 
-# Installa le dipendenze Python
+# Installa pacchetti python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Installa solo Chromium (ottimizzato per la RAM di Render)
+# Installa solo l'eseguibile Chromium di Playwright per salvare RAM su Render
 RUN python -m playwright install chromium
 
 ENV PORT=8080
 EXPOSE 8080
 
-# Avvio con Gunicorn (1 worker e 2 thread per evitare Out of Memory)
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "2", "--timeout", "120", "app:app"]
+# Avvia l'applicazione direttamente tramite Python come richiesto dalla tua logica strutturale
+CMD ["python", "app.py"]
