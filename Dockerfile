@@ -1,4 +1,6 @@
-# Installazione completa delle dipendenze di sistema per Chromium
+FROM python:3.11-slim
+
+# Installazione completa di tutte le dipendenze grafiche per Chromium e Playwright
 RUN apt-get update && apt-get install -y \
     wget \
     curl \
@@ -24,3 +26,19 @@ RUN apt-get update && apt-get install -y \
     libxrender1 \
     libxss1 \
     && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY . /app
+
+# Installa le dipendenze Python
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Installa solo Chromium (ottimizzato per la RAM di Render)
+RUN python -m playwright install chromium
+
+ENV PORT=8080
+EXPOSE 8080
+
+# Avvio con Gunicorn (1 worker e 2 thread per evitare Out of Memory)
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "2", "--timeout", "120", "app:app"]
