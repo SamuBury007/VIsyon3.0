@@ -14,20 +14,18 @@ CORS(app)
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-
 # ============================================================
 # PLAYWRIGHT SCRAPER
 # ============================================================
 
 async def extract_playlist_url(movie_url):
     playlist_urls = []
-
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
         )
 
         context = await browser.new_context(
@@ -39,8 +37,6 @@ async def extract_playlist_url(movie_url):
 
         async def handle_request(request):
             url = request.url
-
-            # 🔥 NON restringere troppo
             if "playlist" in url or "m3u8" in url:
                 if url not in playlist_urls:
                     playlist_urls.append(url)
@@ -50,27 +46,22 @@ async def extract_playlist_url(movie_url):
         try:
             await page.goto(movie_url, wait_until="networkidle", timeout=45000)
 
-            # 🔥 IMPORTANTE: più attesa = più link
             for _ in range(20):
                 await asyncio.sleep(1)
                 if len(playlist_urls) > 0:
                     break
-
         except Exception:
             await asyncio.sleep(8)
 
-        # 🔥 JS extraction (non toccata troppo)
         try:
             js_result = await page.evaluate("""
                 () => {
                     const results = [];
-
                     document.querySelectorAll('script').forEach(s => {
                         const text = s.textContent || '';
                         const matches = text.match(/https?:\\/\\/[^'"\\s]*\\/playlist\\/[^'"\\s]*/g);
                         if (matches) results.push(...matches);
                     });
-
                     return [...new Set(results)];
                 }
             """)
@@ -78,7 +69,6 @@ async def extract_playlist_url(movie_url):
             for url in js_result:
                 if url not in playlist_urls:
                     playlist_urls.append(url)
-
         except:
             pass
 
@@ -105,17 +95,14 @@ def _fetch_m3u8(url, referer):
     except:
         return None
 
-
 def _playlist_has_audio(content):
     if not content:
         return False
     c = content.upper()
     return "EXT-X-MEDIA:TYPE=AUDIO" in c or "MP4A" in c
 
-
 def _is_master_playlist(content):
     return content and "#EXT-X-STREAM-INF" in content.upper()
-
 
 # ============================================================
 # CORE LOGIC
@@ -123,12 +110,10 @@ def _is_master_playlist(content):
 
 async def get_best_playlist(movie_url):
     urls = await extract_playlist_url(movie_url)
-
     if not urls:
         return None
 
     candidates = urls
-
     best = None
     fallback = None
 
@@ -149,12 +134,10 @@ async def get_best_playlist(movie_url):
 
     if best:
         return best
-
     if fallback:
         return fallback
 
     return candidates[0]
-
 
 # ============================================================
 # ROUTES
@@ -162,28 +145,22 @@ async def get_best_playlist(movie_url):
 
 @app.route("/")
 def index():
-    # 🔥 FIX: niente render_template (evita crash Render)
     return jsonify({
         "status": "online",
         "service": "VISYON API"
     })
 
-
 @app.route("/extract", methods=["POST"])
 def api_extract():
-    data = request.get_json()
+    data = request.get_json() or {}
     movie_url = data.get("url", "")
 
     if not movie_url:
-        return jsonify({"success": False, "error": "URL richiesto"})
+        return jsonify({"success": False, "error": "URL richiesto"}), 400
 
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        result = loop.run_until_complete(get_best_playlist(movie_url))
-
-        loop.close()
+        # Modo pulito e sicuro per eseguire codice async dentro Flask in produzione
+        result = asyncio.run(get_best_playlist(movie_url))
 
         if result:
             return jsonify({
@@ -191,20 +168,15 @@ def api_extract():
                 "url": result
             })
 
-        return jsonify({"success": False, "error": "Nessun link trovato"})
+        return jsonify({"success": False, "error": "Nessun link trovato"}), 404
 
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # ============================================================
-# START SERVER (RENDER READY)
+# START SERVER
 # ============================================================
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    app.run(host="0.0.0.0", port=port)
