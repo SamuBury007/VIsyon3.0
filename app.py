@@ -12,7 +12,8 @@ import os
 from urllib.parse import urlparse, parse_qs, urlencode
 from flask import Flask, request, jsonify, render_template
 
-app = Flask(__name__)
+# Configurato per leggere il template direttamente dalla cartella principale (root)
+app = Flask(__name__, template_folder='.')
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
@@ -27,7 +28,6 @@ async def extract_playlist_url(movie_url):
     from playwright.async_api import async_playwright
     
     async with async_playwright() as p:
-        # FIX RENDER: Aggiunti i flag necessari per evitare crash in ambiente Docker Headless
         browser = await p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
@@ -41,13 +41,11 @@ async def extract_playlist_url(movie_url):
         # Intercetta TUTTE le richieste
         async def handle_request(request):
             url = request.url
-            # Cerchiamo SOLO i link /playlist/ su vixsrc.to
             if "/playlist/" in url and "vixsrc.to" in url:
                 if url not in playlist_urls:
                     playlist_urls.append(url)
                     print(f"[+] PLAYLIST: {url}")
             
-            # Anche se ha /playlist/ in altri formati
             if "playlist" in url and "m3u8" in url:
                 if url not in playlist_urls:
                     playlist_urls.append(url)
@@ -55,7 +53,6 @@ async def extract_playlist_url(movie_url):
         
         async def handle_response(response):
             url = response.url
-            # Cattura anche i redirect che portano a playlist
             if "/playlist/" in url and "vixsrc.to" in url:
                 if url not in playlist_urls:
                     playlist_urls.append(url)
@@ -69,7 +66,6 @@ async def extract_playlist_url(movie_url):
         
         try:
             await page.goto(movie_url, wait_until="networkidle", timeout=30000)
-            # Aspetta più a lungo per catturare tutto
             for i in range(15):
                 await asyncio.sleep(1)
                 if playlist_urls:
@@ -78,23 +74,18 @@ async def extract_playlist_url(movie_url):
             print(f"[-] Timeout, ma continuo...")
             await asyncio.sleep(5)
         
-        # Prova anche con evaluate per estrarre direttamente dal JS
         try:
             print("[*] Provo estrazione dal JavaScript...")
             js_result = await page.evaluate("""
                 () => {
                     const results = [];
-                    // Cerca in tutti gli script tag
                     document.querySelectorAll('script').forEach(s => {
                         const text = s.textContent || '';
-                        // Cerca URL con /playlist/
                         const matches = text.match(/https?:\\/\\/[^'"\\s]*\\/playlist\\/[^'"\\s]*/g);
                         if (matches) results.push(...matches);
-                        // Cerca URL vixsrc.to/playlist
                         const matches2 = text.match(/vixsrc\\.to\\/playlist\\/[^'"\\s,&]*/g);
                         if (matches2) results.push(...matches2.map(u => 'https://' + u));
                     });
-                    // Cerca nel DOM
                     const all = document.querySelectorAll('*');
                     all.forEach(el => {
                         if (el.src && el.src.includes('/playlist/')) results.push(el.src);
@@ -105,7 +96,6 @@ async def extract_playlist_url(movie_url):
                 }
             """)
             for url in js_result:
-                # Normalizza: se inizia con // o è relativo
                 if url.startswith("//"):
                     url = "https:" + url
                 elif url.startswith("/"):
@@ -122,8 +112,6 @@ async def extract_playlist_url(movie_url):
 
 
 def _fetch_m3u8(url, referer):
-    """Scarica il contenuto testuale di un m3u8, con gli header giusti
-    (molte CDN di vixsrc richiedono un Referer valido)."""
     try:
         r = requests.get(
             url,
@@ -142,10 +130,6 @@ def _fetch_m3u8(url, referer):
 
 
 def _playlist_has_audio(content):
-    """Un master playlist HLS valido con audio contiene tipicamente:
-    - una o più righe EXT-X-MEDIA:TYPE=AUDIO  (traccia audio separata)
-    - oppure CODECS="...,mp4a..." dentro EXT-X-STREAM-INF (audio muxato)
-    Se manca entrambo, è quasi certamente un sotto-playlist solo video."""
     if not content:
         return False
     if "EXT-X-MEDIA:TYPE=AUDIO" in content.upper():
@@ -156,14 +140,10 @@ def _playlist_has_audio(content):
 
 
 def _is_master_playlist(content):
-    """Un master playlist elenca varianti (#EXT-X-STREAM-INF), a differenza
-    di un media playlist che elenca direttamente i segmenti (#EXTINF)."""
     return bool(content) and "#EXT-X-STREAM-INF" in content.upper()
 
 
 async def get_best_playlist(movie_url):
-    """Trova la playlist migliore, verificando il CONTENUTO del file m3u8
-    (non solo il nome dell'URL) per essere sicuri che includa l'audio."""
     urls = await extract_playlist_url(movie_url)
 
     if not urls:
@@ -176,9 +156,6 @@ async def get_best_playlist(movie_url):
     vixsrc_playlists = [u for u in urls if "vixsrc.to/playlist/" in u]
     candidates = vixsrc_playlists if vixsrc_playlists else urls
 
-    # 1) Cerchiamo tra i candidati un MASTER playlist con audio dichiarato:
-    #    è la scelta più sicura, hls.js sceglierà da solo la variante migliore
-    #    mantenendo la traccia audio collegata.
     master_with_audio = None
     any_with_audio = None
     for u in candidates:
@@ -192,16 +169,13 @@ async def get_best_playlist(movie_url):
             any_with_audio = u
         if has_audio and is_master:
             master_with_audio = u
-            break  # trovato il candidato migliore possibile
+            break
 
     if master_with_audio:
         return master_with_audio
     if any_with_audio:
         return any_with_audio
 
-    # 2) Fallback: nessun controllo sul contenuto è riuscito (es. richieste
-    #    bloccate dalla CDN): restituiamo comunque il primo link trovato,
-    #    meglio di niente, ma segnaliamo il problema nei log.
     print("[!] Impossibile verificare la presenza dell'audio nei playlist trovati, uso il primo disponibile")
     return candidates[0] if candidates else (urls[0] if urls else None)
 
@@ -212,7 +186,6 @@ async def get_best_playlist(movie_url):
 
 @app.route('/')
 def index():
-    # Carica direttamente il file visyon.html posizionato dentro la cartella /templates
     return render_template('visyon.html')
 
 
@@ -225,7 +198,6 @@ def api_extract():
         return jsonify({'success': False, 'error': 'URL richiesto'})
     
     try:
-        # FIX RENDER: asyncio.run gestisce in modo sicuro i loop concorrenti senza bloccare Flask su Render
         playlist_url = asyncio.run(get_best_playlist(movie_url))
         
         if playlist_url:
@@ -257,9 +229,6 @@ if __name__ == '__main__':
         async def run_main():
             await main()
             
-        async def run_main():
-            await main()
-            
         asyncio.run(run_main())
     else:
         print("""
@@ -269,6 +238,5 @@ if __name__ == '__main__':
 ║  Web UI: http://localhost:8080               ║
 ╚══════════════════════════════════════════════╝
         """)
-        # FIX RENDER: Legge la porta dinamica assegnata da Render o usa la 8080 di default
         port = int(os.environ.get("PORT", 8080))
         app.run(host='0.0.0.0', port=port, debug=False)
