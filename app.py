@@ -12,7 +12,7 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 # ============================================================
 # PLAYWRIGHT SCRAPER
@@ -25,43 +25,77 @@ async def extract_playlist_url(movie_url):
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            args=[
+                "--no-sandbox", 
+                "--disable-setuid-sandbox", 
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled" # Camuffa Playwright da browser umano
+            ]
         )
 
         context = await browser.new_context(
             user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 720}
+            viewport={"width": 1920, "height": 1080},
+            locale="it-IT",
+            timezone_id="Europe/Rome"
         )
 
         page = await context.new_page()
 
+        # Evita che i siti leggano "navigator.webdriver = true"
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
         async def handle_request(request):
             url = request.url
-            if "playlist" in url or "m3u8" in url:
+            if "playlist" in url or "m3u8" in url or ".m3u8" in url:
                 if url not in playlist_urls:
                     playlist_urls.append(url)
 
         page.on("request", handle_request)
 
         try:
-            await page.goto(movie_url, wait_until="networkidle", timeout=45000)
+            # Aumentato il timeout di caricamento iniziale
+            await page.goto(movie_url, wait_until="domcontentloaded", timeout=60000)
+            
+            # 1. Prova a cliccare su un eventuale grande bottone Play o sul video per attivare la rete
+            try:
+                # Cerca selettori comuni di player video o overlay di play
+                play_selectors = [
+                    "video", ".jw-video", ".vjs-tech", "iframe", 
+                    "[aria-label='Play']", ".play-button", ".playbtn"
+                ]
+                for selector in play_selectors:
+                    if await page.locator(selector).count() > 0:
+                        await page.locator(selector).first.click(timeout=3000)
+                        break
+            except:
+                pass # Se non riesce a cliccare, prosegue con l'attesa passiva
 
-            for _ in range(20):
+            # 2. Attesa dinamica: controlla se trova link ogni secondo
+            for _ in range(25):
                 await asyncio.sleep(1)
                 if len(playlist_urls) > 0:
                     break
-        except Exception:
-            await asyncio.sleep(8)
+        except Exception as e:
+            print(f"Errore durante la navigazione: {e}")
+            await asyncio.sleep(5)
 
+        # 3. Estrazione via Javascript (Regex aggiornata)
         try:
             js_result = await page.evaluate("""
                 () => {
                     const results = [];
+                    // Cerca ovunque nella pagina e negli script
+                    const html = document.documentElement.innerHTML;
+                    const matches = html.match(/https?:\\/\\/[^'"\\s\\n\\r]*\\.(m3u8|playlist)[^'"\\s\\n\\r]*/g);
+                    if (matches) results.push(...matches);
+                    
                     document.querySelectorAll('script').forEach(s => {
                         const text = s.textContent || '';
-                        const matches = text.match(/https?:\\/\\/[^'"\\s]*\\/playlist\\/[^'"\\s]*/g);
-                        if (matches) results.push(...matches);
+                        const matchesScript = text.match(/https?:\\/\\/[^'"\\s]*\\/playlist\\/[^'"\\s]*/g);
+                        if (matchesScript) results.push(...matchesScript);
                     });
+
                     return [...new Set(results)];
                 }
             """)
@@ -99,7 +133,7 @@ def _playlist_has_audio(content):
     if not content:
         return False
     c = content.upper()
-    return "EXT-X-MEDIA:TYPE=AUDIO" in c or "MP4A" in c
+    return "EXT-X-MEDIA:TYPE=AUDIO" in c or "MP4A" in c or "#EXT-X-STREAM-INF" in c
 
 def _is_master_playlist(content):
     return content and "#EXT-X-STREAM-INF" in content.upper()
@@ -159,7 +193,6 @@ def api_extract():
         return jsonify({"success": False, "error": "URL richiesto"}), 400
 
     try:
-        # Modo pulito e sicuro per eseguire codice async dentro Flask in produzione
         result = asyncio.run(get_best_playlist(movie_url))
 
         if result:
@@ -172,10 +205,6 @@ def api_extract():
 
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
-
-# ============================================================
-# START SERVER
-# ============================================================
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
