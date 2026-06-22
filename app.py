@@ -27,7 +27,7 @@ async def extract_playlist_url(movie_url):
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]  # 🔥 FIX RENDER
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
         )
 
         context = await browser.new_context(
@@ -40,25 +40,51 @@ async def extract_playlist_url(movie_url):
         async def handle_request(request):
             url = request.url
 
-            if "vixsrc.to" in url and "/playlist/" in url:
+            # 🔥 NON restringere troppo
+            if "playlist" in url or "m3u8" in url:
                 if url not in playlist_urls:
                     playlist_urls.append(url)
-
-            if "m3u8" in url and url not in playlist_urls:
-                playlist_urls.append(url)
 
         page.on("request", handle_request)
 
         try:
-            await page.goto(movie_url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(5)
+            await page.goto(movie_url, wait_until="networkidle", timeout=45000)
+
+            # 🔥 IMPORTANTE: più attesa = più link
+            for _ in range(20):
+                await asyncio.sleep(1)
+                if len(playlist_urls) > 0:
+                    break
+
         except Exception:
+            await asyncio.sleep(8)
+
+        # 🔥 JS extraction (non toccata troppo)
+        try:
+            js_result = await page.evaluate("""
+                () => {
+                    const results = [];
+
+                    document.querySelectorAll('script').forEach(s => {
+                        const text = s.textContent || '';
+                        const matches = text.match(/https?:\\/\\/[^'"\\s]*\\/playlist\\/[^'"\\s]*/g);
+                        if (matches) results.push(...matches);
+                    });
+
+                    return [...new Set(results)];
+                }
+            """)
+
+            for url in js_result:
+                if url not in playlist_urls:
+                    playlist_urls.append(url)
+
+        except:
             pass
 
         await browser.close()
 
     return playlist_urls
-
 
 # ============================================================
 # M3U8 HELPERS
